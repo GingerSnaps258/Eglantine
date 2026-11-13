@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "video_core/buffer_cache/buffer_cache_base.h"
+#include "video_core/nx2_gpu_work.h"
 #include "video_core/nx2_perf.h"
 #include "video_core/nx2_profile.h"
 #include "video_core/renderer_vulkan/vk_buffer_cache.h"
@@ -518,6 +519,7 @@ bool BufferCacheRuntime::CanReorderUpload(const Buffer& buffer,
 void BufferCacheRuntime::CopyBuffer(VkBuffer dst_buffer, VkBuffer src_buffer,
                                     std::span<const VideoCommon::BufferCopy> copies, bool barrier,
                                     bool can_reorder_upload) {
+    const VideoCommon::Nx2GpuWork::InnerTag gpu_work{VideoCommon::Nx2GpuWork::Work::BufferCopy};
     if (dst_buffer == VK_NULL_HANDLE || src_buffer == VK_NULL_HANDLE) {
         return;
     }
@@ -560,6 +562,7 @@ void BufferCacheRuntime::CopyBuffer(VkBuffer dst_buffer, VkBuffer src_buffer,
 }
 
 void BufferCacheRuntime::PreCopyBarrier() {
+    const VideoCommon::Nx2GpuWork::InnerTag gpu_work{VideoCommon::Nx2GpuWork::Work::BufferCopy};
     static constexpr VkMemoryBarrier READ_BARRIER{
         .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
         .pNext = nullptr,
@@ -574,6 +577,7 @@ void BufferCacheRuntime::PreCopyBarrier() {
 }
 
 void BufferCacheRuntime::PostCopyBarrier() {
+    const VideoCommon::Nx2GpuWork::InnerTag gpu_work{VideoCommon::Nx2GpuWork::Work::BufferCopy};
     static constexpr VkMemoryBarrier WRITE_BARRIER{
         .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
         .pNext = nullptr,
@@ -588,6 +592,7 @@ void BufferCacheRuntime::PostCopyBarrier() {
 }
 
 void BufferCacheRuntime::ClearBuffer(VkBuffer dest_buffer, u32 offset, size_t size, u32 value) {
+    const VideoCommon::Nx2GpuWork::InnerTag gpu_work{VideoCommon::Nx2GpuWork::Work::BufferCopy};
     if (dest_buffer == VK_NULL_HANDLE) {
         return;
     }

@@ -14,6 +14,7 @@
 #include <utility>
 #include <vector>
 #include "video_core/renderer_vulkan/vk_texture_cache.h"
+#include "video_core/nx2_gpu_work.h"
 #include "common/bit_util.h"
 #include "common/common_types.h"
 #include "video_core/engines/maxwell_3d.h"
@@ -1581,6 +1582,7 @@ VideoCommon::StreamerInterface* QueryCacheRuntime::GetStreamerInterface(QueryTyp
 }
 
 void QueryCacheRuntime::Barriers(bool is_prebarrier) {
+    const VideoCommon::Nx2GpuWork::InnerTag gpu_work{VideoCommon::Nx2GpuWork::Work::Queries};
     static constexpr VkMemoryBarrier READ_BARRIER{
         .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
         .pNext = nullptr,
@@ -1609,6 +1611,7 @@ void QueryCacheRuntime::Barriers(bool is_prebarrier) {
 
 template <typename SyncValuesType>
 void QueryCacheRuntime::SyncValues(std::span<SyncValuesType> values, VkBuffer base_src_buffer) {
+    const VideoCommon::Nx2GpuWork::InnerTag gpu_work{VideoCommon::Nx2GpuWork::Work::Queries};
     if (values.size() == 0) {
         return;
     }

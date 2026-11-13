@@ -116,6 +116,7 @@ add_library(video_core STATIC
     nx2_debug_control.cpp
     nx2_debug_control.h
     nx2_diag.h
+    nx2_gpu_work.h
     nx2_profile.h
     nx2_spikes.cpp
     nx2_spikes.h
@@ -208,6 +209,8 @@ add_library(video_core STATIC
     renderer_vulkan/vk_fence_manager.h
     renderer_vulkan/vk_frame_dump.cpp
     renderer_vulkan/vk_frame_dump.h
+    renderer_vulkan/vk_gpu_timing.cpp
+    renderer_vulkan/vk_gpu_timing.h
     renderer_vulkan/vk_graphics_pipeline.cpp
     renderer_vulkan/vk_graphics_pipeline.h
     renderer_vulkan/vk_multi_range_buffer.cpp

@@ -22,6 +22,7 @@
 #include "video_core/nx2_perf.h"
 #include "video_core/nx2_profile.h"
 #include "video_core/renderer_vulkan/vk_command_pool.h"
+#include "video_core/renderer_vulkan/vk_gpu_timing.h"
 #include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
 #include "video_core/renderer_vulkan/vk_master_semaphore.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
@@ -52,6 +53,7 @@ Scheduler::Scheduler(const Device& device_, StateTracker& state_tracker_)
       master_semaphore{std::make_unique<MasterSemaphore>(device)},
       command_pool{std::make_unique<CommandPool>(*master_semaphore, device)} {
 
+    gpu_timing = std::make_unique<GpuTiming>(device, *master_semaphore);
     AcquireNewChunk();
     AllocateWorkerCommandBuffer();
     worker_thread = std::jthread([this](std::stop_token token) { WorkerThread(token); });
@@ -193,6 +195,7 @@ void Scheduler::BeginRenderPassImpl(const Framebuffer* framebuffer, VkRenderPass
         values[i] = clear_values[i];
     }
     const bool after_compute = std::exchange(compute_writes_pending, false);
+    const VideoCommon::Nx2GpuWork::Tag gpu_work{VideoCommon::Nx2GpuWork::Work::RenderPassBegin};
     Record([renderpass, framebuffer_handle, render_area, values, clear_value_count,
             after_compute](vk::CommandBuffer cmdbuf) {
         const VkRenderPassBeginInfo renderpass_bi{
@@ -412,6 +415,21 @@ void Scheduler::AllocateWorkerCommandBuffer() {
         .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
         .pInheritanceInfo = nullptr,
     });
+    gpu_timing->Begin(current_cmdbuf, current_upload_cmdbuf);
+}
+
+void Scheduler::MarkGpuWork(VideoCommon::Nx2GpuWork::Work work) {
+    if (work == marked_work) {
+        return;
+    }
+    marked_work = work;
+    auto command = [this, work](vk::CommandBuffer cmdbuf, vk::CommandBuffer) {
+        gpu_timing->Mark(cmdbuf, work);
+    };
+    if (!chunk->Record(command)) {
+        DispatchWork();
+        (void)chunk->Record(command);
+    }
 }
 
 u64 Scheduler::SubmitExecution(VkSemaphore signal_semaphore, VkSemaphore wait_semaphore) {
@@ -420,6 +438,7 @@ u64 Scheduler::SubmitExecution(VkSemaphore signal_semaphore, VkSemaphore wait_se
     draws_since_submit = 0;
 
     const u64 signal_value = master_semaphore->NextTick();
+    const VideoCommon::Nx2GpuWork::Tag submit_end_tag{VideoCommon::Nx2GpuWork::Work::SubmitEnd};
     RecordWithUploadBuffer([signal_semaphore, wait_semaphore, signal_value,
                             this](vk::CommandBuffer cmdbuf, vk::CommandBuffer upload_cmdbuf) {
         static constexpr VkMemoryBarrier WRITE_BARRIER{
@@ -435,8 +454,9 @@ u64 Scheduler::SubmitExecution(VkSemaphore signal_semaphore, VkSemaphore wait_se
             .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
         };
         upload_cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, WRITE_BARRIER);
-        upload_cmdbuf.End();
         cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, READ_BARRIER);
+        gpu_timing->End(cmdbuf, upload_cmdbuf, signal_value);
+        upload_cmdbuf.End();
         cmdbuf.End();
 
         if (on_submit) {
@@ -464,6 +484,7 @@ u64 Scheduler::SubmitExecution(VkSemaphore signal_semaphore, VkSemaphore wait_se
     });
     chunk->MarkSubmit();
     DispatchWork();
+    marked_work = VideoCommon::Nx2GpuWork::Work::Count;
     return signal_value;
 }
 
@@ -507,6 +528,7 @@ void Scheduler::EndRenderPass()
         query_cache->CounterEnable(VideoCommon::QueryType::ZPassPixelCount64, false);
         query_cache->NotifySegment(false);
 
+        const VideoCommon::Nx2GpuWork::Tag gpu_work{VideoCommon::Nx2GpuWork::Work::RenderPassEnd};
         Record([num_images = num_renderpass_images,
                        images = renderpass_images,
                        ranges = renderpass_image_ranges,

@@ -286,6 +286,7 @@ struct DeviceDispatch : InstanceDispatch {
     PFN_vkCmdSetColorBlendEnableEXT vkCmdSetColorBlendEnableEXT{};
     PFN_vkCmdSetColorBlendEquationEXT vkCmdSetColorBlendEquationEXT{};
     PFN_vkCmdWaitEvents vkCmdWaitEvents{};
+    PFN_vkCmdWriteTimestamp vkCmdWriteTimestamp{};
     PFN_vkCreateBuffer vkCreateBuffer{};
     PFN_vkCreateBufferView vkCreateBufferView{};
     PFN_vkCreateCommandPool vkCreateCommandPool{};
@@ -1603,6 +1604,11 @@ public:
         dld->vkCmdWaitEvents(handle, events.size(), events.data(), src_stage_mask, dst_stage_mask,
                              memory_barriers.size(), memory_barriers.data(), buffer_barriers.size(),
                              buffer_barriers.data(), image_barriers.size(), image_barriers.data());
+    }
+
+    void WriteTimestamp(VkPipelineStageFlagBits stage, VkQueryPool query_pool,
+                        u32 query) const noexcept {
+        dld->vkCmdWriteTimestamp(handle, stage, query_pool, query);
     }
 
     void BindVertexBuffers2EXT(u32 first_binding, u32 binding_count, const VkBuffer* buffers,

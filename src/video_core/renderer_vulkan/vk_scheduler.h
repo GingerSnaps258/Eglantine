@@ -20,6 +20,7 @@
 #include "common/polyfill_thread.h"
 #include "common/settings.h"
 #include "video_core/gpu_split.h"
+#include "video_core/nx2_gpu_work.h"
 #include "video_core/renderer_vulkan/fragment_barrier_state.h"
 #include "video_core/renderer_vulkan/vk_master_semaphore.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
@@ -34,6 +35,7 @@ namespace Vulkan {
 class CommandPool;
 class Device;
 class Framebuffer;
+class GpuTiming;
 class GraphicsPipeline;
 class StateTracker;
 
@@ -200,6 +202,9 @@ public:
     void RecordWithUploadBuffer(T&& command) {
         if (VideoCommon::GpuSplit::check_owner) [[unlikely]] {
             VideoCommon::GpuSplit::CheckOwner("Scheduler::Record");
+        }
+        if (VideoCommon::Nx2GpuWork::Enabled()) [[unlikely]] {
+            MarkGpuWork(VideoCommon::Nx2GpuWork::Current());
         }
         if (chunk->Record(command)) {
             return;
@@ -420,10 +425,16 @@ private:
 
     void AcquireNewChunk();
 
+    /// GPU timestamps: records a timestamp when the kind of recorded work changes.
+    void MarkGpuWork(VideoCommon::Nx2GpuWork::Work work);
+
     const Device& device;
     StateTracker& state_tracker;
 
     std::unique_ptr<MasterSemaphore> master_semaphore;
+    std::unique_ptr<GpuTiming> gpu_timing;
+    /// The kind of work last marked in the command buffer being recorded (Count: none yet).
+    VideoCommon::Nx2GpuWork::Work marked_work{VideoCommon::Nx2GpuWork::Work::Count};
     FragmentBarrierState fragment_barrier;
     bool render_pass_has_stores{};
     bool compute_writes_pending{};

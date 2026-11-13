@@ -49,6 +49,7 @@
 #include "video_core/renderer_vulkan/maxwell_to_vk.h"
 #include "video_core/renderer_vulkan/vk_buffer_cache.h"
 #include "video_core/nx2_draw_stats.h"
+#include "video_core/nx2_gpu_work.h"
 #include "video_core/renderer_vulkan/vk_compute_pipeline.h"
 #include "video_core/renderer_vulkan/vk_descriptor_pool.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
@@ -1244,6 +1245,7 @@ void TraceWindowTarget(const Tegra::Engines::Maxwell3D& maxwell3d, Tegra::Memory
 } // Anonymous namespace
 
 void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
+    const VideoCommon::Nx2GpuWork::Tag gpu_work{VideoCommon::Nx2GpuWork::Work::Draw};
     VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::Draw};
     {
         // A draw's first and count can come from memory a skipped (rejected) compute program
@@ -1463,6 +1465,7 @@ void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
 }
 
 void RasterizerVulkan::DrawIndirect() {
+    const VideoCommon::Nx2GpuWork::Tag gpu_work{VideoCommon::Nx2GpuWork::Work::Draw};
     VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::Draw};
     const auto& params = maxwell3d->draw_manager.indirect_state;
     if (VideoCommon::Nx2Diag::Active()) {
@@ -1546,6 +1549,7 @@ void RasterizerVulkan::DrawIndirect() {
 }
 
 void RasterizerVulkan::DrawTexture() {
+    const VideoCommon::Nx2GpuWork::Tag gpu_work{VideoCommon::Nx2GpuWork::Work::Draw};
 
     SCOPE_EXIT {
         gpu.TickWork();
@@ -1596,6 +1600,7 @@ void RasterizerVulkan::DrawTexture() {
 }
 
 void RasterizerVulkan::Clear(u32 layer_count) {
+    const VideoCommon::Nx2GpuWork::Tag gpu_work{VideoCommon::Nx2GpuWork::Work::Clear};
     VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::Clear};
     if (Tegra::Engines::g_nx2_trace_draws_after_upscale > 0) {
         const auto& regs = maxwell3d->regs;
@@ -1808,6 +1813,7 @@ bool SyncFixEnabled() {
 } // namespace
 
 void RasterizerVulkan::DispatchCompute() {
+    const VideoCommon::Nx2GpuWork::Tag gpu_work{VideoCommon::Nx2GpuWork::Work::Compute};
     VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::Compute};
     FlushWork();
     gpu_memory->FlushCaching();
@@ -1958,6 +1964,7 @@ void RasterizerVulkan::DispatchCompute() {
 }
 
 void RasterizerVulkan::ResetCounter(VideoCommon::QueryType type) {
+    const VideoCommon::Nx2GpuWork::Tag gpu_work{VideoCommon::Nx2GpuWork::Work::Queries};
     switch (type) {
     case VideoCommon::QueryType::ZPassPixelCount64:
     case VideoCommon::QueryType::StreamingByteCount:
@@ -1973,6 +1980,7 @@ void RasterizerVulkan::ResetCounter(VideoCommon::QueryType type) {
 
 void RasterizerVulkan::Query(GPUVAddr gpu_addr, VideoCommon::QueryType type,
                              VideoCommon::QueryPropertiesFlags flags, u32 payload, u32 subreport) {
+    const VideoCommon::Nx2GpuWork::Tag gpu_work{VideoCommon::Nx2GpuWork::Work::Queries};
     query_cache.CounterReport(gpu_addr, type, flags, payload, subreport);
 }
 
@@ -2499,6 +2507,7 @@ bool RasterizerVulkan::HasDrawTransformFeedback() {
 bool RasterizerVulkan::AccelerateSurfaceCopy(const Tegra::Engines::Fermi2D::Surface& src,
                                              const Tegra::Engines::Fermi2D::Surface& dst,
                                              const Tegra::Engines::Fermi2D::Config& copy_config) {
+    const VideoCommon::Nx2GpuWork::Tag gpu_work{VideoCommon::Nx2GpuWork::Work::ImageCopy};
     std::scoped_lock lock{texture_cache.mutex};
     return texture_cache.BlitImage(dst, src, copy_config);
 }
@@ -2522,6 +2531,7 @@ bool RasterizerVulkan::AccelerateTemporalUpscale(
     const Tegra::Engines::Fermi2D::Surface& src, const Tegra::Engines::Fermi2D::Surface& dst,
     const Tegra::Engines::Fermi2D::Surface& motion_vectors, const Tegra::Texture::TICEntry* depth,
     std::array<f32, 2> jitter, std::array<f32, 2> motion_scale) {
+    const VideoCommon::Nx2GpuWork::Tag gpu_work{VideoCommon::Nx2GpuWork::Work::Upscale};
     std::scoped_lock lock{texture_cache.mutex};
     return texture_cache.TemporalUpscale(dst, src, motion_vectors, depth, jitter, motion_scale);
 }
@@ -2668,6 +2678,7 @@ void RasterizerVulkan::NoteCameraMotionClear() {
 
 bool RasterizerVulkan::AccelerateCameraMotionUpscale(const Tegra::Engines::Fermi2D::Surface& src,
                                                      const Tegra::Engines::Fermi2D::Surface& dst) {
+    const VideoCommon::Nx2GpuWork::Tag gpu_work{VideoCommon::Nx2GpuWork::Work::Upscale};
     namespace Ocarina = VideoCommon::OcarinaUpscale;
     auto& motion = camera_motion;
     motion.armed = true;
@@ -2804,6 +2815,7 @@ Tegra::Engines::AccelerateDMAInterface& RasterizerVulkan::AccessAccelerateDMA() 
 
 void RasterizerVulkan::AccelerateInlineToMemory(GPUVAddr address, size_t copy_size,
                                                 std::span<const u8> memory) {
+    const VideoCommon::Nx2GpuWork::Tag gpu_work{VideoCommon::Nx2GpuWork::Work::BufferUpload};
     auto cpu_addr = gpu_memory->GpuToCpuAddress(address);
     if (gpu_memory->UsesNativeTiling()) {
         u32 first_word{};
@@ -3066,6 +3078,7 @@ template <bool IS_IMAGE_UPLOAD>
 bool AccelerateDMA::DmaBufferImageCopy(const Tegra::DMA::ImageCopy& copy_info,
                                        const Tegra::DMA::BufferOperand& buffer_operand,
                                        const Tegra::DMA::ImageOperand& image_operand) {
+    const VideoCommon::Nx2GpuWork::Tag gpu_work{VideoCommon::Nx2GpuWork::Work::ImageCopy};
     std::scoped_lock lock{buffer_cache.mutex, texture_cache.mutex};
     const auto image_id = texture_cache.DmaImageId(image_operand, IS_IMAGE_UPLOAD);
     if (image_id == VideoCommon::NULL_IMAGE_ID) {

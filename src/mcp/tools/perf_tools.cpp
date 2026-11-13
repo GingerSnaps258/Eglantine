@@ -30,6 +30,7 @@
 #include "mcp/tool_registry.h"
 #include "mcp/tools/tool_helpers.h"
 #include "common/host_memory.h"
+#include "video_core/nx2_gpu_work.h"
 #include "video_core/nx2_profile.h"
 #include "video_core/nx2_spikes.h"
 
@@ -38,6 +39,10 @@ namespace Mcp {
 namespace {
 
 namespace Profile = VideoCommon::Nx2Profile;
+namespace GpuWork = VideoCommon::Nx2GpuWork;
+
+/// The host GPU timestamp report's name (Vulkan::GpuTiming).
+constexpr std::string_view HOST_GPU = "host GPU";
 
 /// One GPU thread's profiler report as JSON: zones sorted by cost (only the `top` costliest
 /// when non-zero), non-zero counters, and the report's age relative to `now` (ns).
@@ -86,11 +91,16 @@ ToolResult GpuProfile(ToolContext& ctx, const json& args) {
     if (args.contains("enable") && args["enable"].get<bool>() != was_enabled) {
         Profile::SetEnabled(args["enable"].get<bool>());
     }
+    const bool timestamps_were_on = GpuWork::Enabled();
+    if (args.contains("gpu_timestamps")) {
+        GpuWork::g_enabled.store(args["gpu_timestamps"].get<bool>(), std::memory_order_relaxed);
+    }
     const bool enabled = Profile::Enabled();
     const u64 window_ms = Profile::g_window_ns.load(std::memory_order_relaxed) / 1'000'000ULL;
 
     // Fresh data: wait for a report that covers only time after this call.
-    const bool fresh = args.value("fresh", enabled && !was_enabled);
+    const bool fresh = args.value(
+        "fresh", (enabled && !was_enabled) || (GpuWork::Enabled() && !timestamps_were_on));
     const u64 called = Profile::Now();
     if (fresh && enabled && ctx.GameRunning()) {
         const auto deadline = steady_clock::now() + milliseconds{2 * window_ms + 3000};
@@ -99,6 +109,7 @@ ToolResult GpuProfile(ToolContext& ctx, const json& args) {
             size_t newer = 0;
             size_t total = 0;
             bool front_fresh = false;
+            bool host_gpu_fresh = false;
             {
                 std::scoped_lock lock{Profile::SnapshotMutex()};
                 total = Profile::Snapshots().size();
@@ -106,9 +117,10 @@ ToolResult GpuProfile(ToolContext& ctx, const json& args) {
                     const bool is_fresh = snap.when_ns - snap.window_ns >= called;
                     newer += is_fresh ? 1 : 0;
                     front_fresh |= is_fresh && name == "GPU thread";
+                    host_gpu_fresh |= is_fresh && name == HOST_GPU;
                 }
             }
-            if (front_fresh && newer >= total) {
+            if (front_fresh && newer >= total && (!GpuWork::Enabled() || host_gpu_fresh)) {
                 break;
             }
             std::this_thread::sleep_for(milliseconds{50});
@@ -124,7 +136,10 @@ ToolResult GpuProfile(ToolContext& ctx, const json& args) {
             threads.push_back(SnapshotJson(snap, now, top));
         }
     }
-    json out{{"enabled", enabled}, {"window_ms", window_ms}, {"threads", std::move(threads)}};
+    json out{{"enabled", enabled},
+             {"gpu_timestamps", GpuWork::Enabled()},
+             {"window_ms", window_ms},
+             {"threads", std::move(threads)}};
     if (json perf = PerfJson(ctx); !perf.is_null()) {
         out["perf"] = std::move(perf);
     }
@@ -135,7 +150,11 @@ ToolResult GpuProfile(ToolContext& ctx, const json& args) {
     }
     out["legend"] = "zones: exclusive ms per second of wall time per GPU thread ('GPU thread' = "
                     "front/parsing, 'GPU back thread' = Vulkan recording). 'split drain' on the "
-                    "front = waiting for the back; 'split wait' on the back = idle.";
+                    "front = waiting for the back; 'split wait' on the back = idle. 'host GPU' "
+                    "(gpu_timestamps:true) = host GPU time per kind of recorded work from "
+                    "timestamps; 'between command buffers' is GPU time outside Eden's command "
+                    "buffers (present submits, idle). Each timestamp stalls the GPU pipeline "
+                    "briefly, so compare fps with them off.";
     return ToolResult::Structured(std::move(out));
 }
 
@@ -191,6 +210,11 @@ ToolResult PerfSample(ToolContext& ctx, const json& args) {
     const int seconds = args.value("seconds", 10);
     const bool profile = args.value("profile", true);
     const bool was_enabled = Profile::Enabled();
+    const bool timestamps_were_on = GpuWork::Enabled();
+    const bool timestamps = profile && args.value("gpu_timestamps", timestamps_were_on);
+    if (profile) {
+        GpuWork::g_enabled.store(timestamps, std::memory_order_relaxed);
+    }
     const u64 old_window = Profile::g_window_ns.load(std::memory_order_relaxed);
     if (profile) {
         // One report covering exactly this window (toggling restarts every thread's totals).
@@ -275,16 +299,19 @@ ToolResult PerfSample(ToolContext& ctx, const json& args) {
         while (steady_clock::now() < deadline) {
             gpu = json::array();
             bool front = false;
+            bool host_gpu = false;
             {
                 std::scoped_lock lock{Profile::SnapshotMutex()};
                 for (const auto& [name, snap] : Profile::Snapshots()) {
                     if (snap.when_ns >= profile_from) {
-                        gpu.push_back(SnapshotJson(snap, Profile::Now(), 6));
+                        // All of the host GPU report's kinds: together they are its busy time.
+                        gpu.push_back(SnapshotJson(snap, Profile::Now(), name == HOST_GPU ? 0 : 6));
                         front |= name == "GPU thread";
+                        host_gpu |= name == HOST_GPU;
                     }
                 }
             }
-            if (front) {
+            if (front && (!timestamps || host_gpu)) {
                 break;
             }
             std::this_thread::sleep_for(milliseconds{100});
@@ -292,6 +319,7 @@ ToolResult PerfSample(ToolContext& ctx, const json& args) {
         out["gpu_profile"] = std::move(gpu);
         Profile::g_window_ns.store(old_window, std::memory_order_relaxed);
         Profile::SetEnabled(was_enabled);
+        GpuWork::g_enabled.store(timestamps_were_on, std::memory_order_relaxed);
     }
 
     ToolResult result;
@@ -483,11 +511,13 @@ void RegisterPerfTools(ToolRegistry& registry) {
             "frame time, 1% low), a GPU-thread profile covering exactly that window, host CPU per "
             "emulator thread, and either a baseline check (baseline: name -> similarity score + "
             "current image) or a screenshot. The before/after measurement for performance work: "
-            "run it at the same route checkpoint before and after a change.",
+            "run it at the same route checkpoint before and after a change. gpu_timestamps adds "
+            "host GPU time per kind of work over the window.",
         .input_schema = {{"type", "object"},
                          {"properties",
                           {{"seconds", {{"type", "integer"}, {"minimum", 2}, {"maximum", 60}}},
                            {"profile", {{"type", "boolean"}}},
+                           {"gpu_timestamps", {{"type", "boolean"}}},
                            {"baseline", {{"type", "string"}}},
                            {"baseline_threshold", {{"type", "number"}, {"minimum", 0}, {"maximum", 1}}},
                            {"screenshot", {{"type", "boolean"}}},
@@ -572,10 +602,13 @@ void RegisterPerfTools(ToolRegistry& registry) {
             "calls/s per zone (draw, macro, update buffers, split drain...), counters (register "
             "writes, downloads, semaphore acquires) and split drains, plus fps. enable turns the "
             "profiler on/off live; window_ms sets the report window (default 10000); fresh waits "
-            "for a report covering only time after the call (default when just enabled).",
+            "for a report covering only time after the call (default when just enabled). "
+            "gpu_timestamps turns on host GPU timing: a 'host GPU' report of GPU ms/s per kind "
+            "of work (draws, copies, uploads, render pass breaks, ASTC, upscale, present...).",
         .input_schema = {{"type", "object"},
                          {"properties",
                           {{"enable", {{"type", "boolean"}}},
+                           {"gpu_timestamps", {{"type", "boolean"}}},
                            {"window_ms", {{"type", "integer"}, {"minimum", 1000}, {"maximum", 60000}}},
                            {"fresh", {{"type", "boolean"}}},
                            {"top_zones", {{"type", "integer"}, {"minimum", 0}, {"maximum", 64},

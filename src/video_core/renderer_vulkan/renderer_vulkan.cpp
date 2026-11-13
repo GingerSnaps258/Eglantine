@@ -23,6 +23,7 @@
 #include "core/frontend/graphics_context.h"
 #include "video_core/capture.h"
 #include "video_core/gpu.h"
+#include "video_core/nx2_gpu_work.h"
 #include "video_core/present.h"
 #include "video_core/renderer_vulkan/present/util.h"
 #ifdef HAS_RESHADE
@@ -209,6 +210,7 @@ RendererVulkan::~RendererVulkan() {
 }
 
 void RendererVulkan::Composite(std::span<const Tegra::FramebufferConfig> framebuffers) {
+    const VideoCommon::Nx2GpuWork::Tag gpu_work{VideoCommon::Nx2GpuWork::Work::Present};
     SCOPE_EXIT {
         render_window.OnFrameDisplayed();
     };
@@ -314,6 +316,7 @@ vk::Buffer RendererVulkan::RenderToBuffer(std::span<const Tegra::FramebufferConf
 }
 
 void RendererVulkan::RenderScreenshot(std::span<const Tegra::FramebufferConfig> framebuffers) {
+    const VideoCommon::Nx2GpuWork::Tag gpu_work{VideoCommon::Nx2GpuWork::Work::Present};
     if (!renderer_settings.screenshot_requested) {
         return;
     }

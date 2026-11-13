@@ -24,6 +24,7 @@
 
 #include "video_core/renderer_vulkan/vk_texture_cache.h"
 #include "video_core/nx2.h"
+#include "video_core/nx2_gpu_work.h"
 #include "video_core/gpu_logging/gpu_logging.h"
 
 #include "video_core/engines/fermi_2d.h"
@@ -1409,6 +1410,7 @@ void TextureCacheRuntime::BarrierFeedbackLoop() {
 
 void TextureCacheRuntime::ReinterpretImage(Image& dst, Image& src,
                                            std::span<const VideoCommon::ImageCopy> copies) {
+    const VideoCommon::Nx2GpuWork::InnerTag gpu_work{VideoCommon::Nx2GpuWork::Work::ImageCopy};
     if (ENABLE_MSAA_RESOLVE_CONSUME) {
         InvalidateResolveShadow(dst.Handle());
     }
@@ -1593,6 +1595,7 @@ bool TextureCacheRuntime::UpscaleWithFsr3(Framebuffer* dst_framebuffer, ImageVie
                                           std::array<u32, 2> render_size,
                                           std::array<f32, 2> jitter,
                                           std::array<f32, 2> motion_scale) {
+    const VideoCommon::Nx2GpuWork::Tag gpu_work{VideoCommon::Nx2GpuWork::Work::Upscale};
     if (!WantsTemporalUpscaleDepth()) {
         return false;
     }
@@ -1667,6 +1670,7 @@ bool TextureCacheRuntime::UpscaleWithFsr3(Framebuffer* dst_framebuffer, ImageVie
 
 void TextureCacheRuntime::DrawUpscaledOutput(Framebuffer* dst_framebuffer, VkImageView view,
                                              VkImage output, VkSampler sampler) {
+    const VideoCommon::Nx2GpuWork::InnerTag gpu_work{VideoCommon::Nx2GpuWork::Work::Upscale};
     // Draw the result into the DLSS output, which keeps its own format; the blit leaves the
     // upscaler's output image in SHADER_READ_ONLY_OPTIMAL, so return it to GENERAL for the next
     // frame.
@@ -1755,6 +1759,7 @@ bool TextureCacheRuntime::UpscaleWithDlss(Framebuffer* dst_framebuffer, ImageVie
                                           std::array<u32, 2> render_size,
                                           std::array<f32, 2> jitter,
                                           std::array<f32, 2> motion_scale, bool reset) {
+    const VideoCommon::Nx2GpuWork::Tag gpu_work{VideoCommon::Nx2GpuWork::Work::Upscale};
     if (!DlssUpscaler()) {
         return false;
     }
@@ -1797,6 +1802,7 @@ bool TextureCacheRuntime::UpscaleWithCameraMotion(Framebuffer* dst_framebuffer,
                                                   std::array<u32, 2> render_size,
                                                   const std::array<f32, 16>& reprojection,
                                                   std::array<f32, 2> jitter, bool reset) {
+    const VideoCommon::Nx2GpuWork::Tag gpu_work{VideoCommon::Nx2GpuWork::Work::Upscale};
 #ifdef EGLANTINE_STREAMLINE
     const VkExtent2D render_extent{render_size[0], render_size[1]};
     const VkExtent2D upscale_extent = dst_framebuffer->RenderArea();
@@ -1871,6 +1877,7 @@ bool TextureCacheRuntime::TemporalUpscale(Framebuffer* dst_framebuffer, ImageVie
                                           ImageView* depth, std::array<u32, 2> render_size,
                                           std::array<f32, 2> jitter,
                                           std::array<f32, 2> motion_scale) {
+    const VideoCommon::Nx2GpuWork::Tag gpu_work{VideoCommon::Nx2GpuWork::Work::Upscale};
     if (dst.Samples() != VK_SAMPLE_COUNT_1_BIT || ImageAspectMask(dst.format) != VK_IMAGE_ASPECT_COLOR_BIT) {
         return false;
     }
@@ -2062,6 +2069,7 @@ void TextureCacheRuntime::BlitImage(Framebuffer* dst_framebuffer, ImageView& dst
                                     const Region2D& dst_region, const Region2D& src_region,
                                     Tegra::Engines::Fermi2D::Filter filter,
                                     Tegra::Engines::Fermi2D::Operation operation) {
+    const VideoCommon::Nx2GpuWork::InnerTag gpu_work{VideoCommon::Nx2GpuWork::Work::ImageCopy};
     const VkImageAspectFlags aspect_mask = ImageAspectMask(src.format);
     const bool is_dst_msaa = dst.Samples() != VK_SAMPLE_COUNT_1_BIT;
     const bool is_src_msaa = src.Samples() != VK_SAMPLE_COUNT_1_BIT;
@@ -2217,6 +2225,7 @@ void TextureCacheRuntime::BlitImage(Framebuffer* dst_framebuffer, ImageView& dst
 }
 
 void TextureCacheRuntime::ConvertImage(Framebuffer* dst, ImageView& dst_view, ImageView& src_view) {
+    const VideoCommon::Nx2GpuWork::InnerTag gpu_work{VideoCommon::Nx2GpuWork::Work::ImageCopy};
     if (!dst->RenderPass()) {
         return;
     }
@@ -2338,6 +2347,7 @@ bool TextureCacheRuntime::IsFormatScalable(PixelFormat format) {
 
 void TextureCacheRuntime::CopyImage(Image& dst, Image& src,
                                     std::span<const VideoCommon::ImageCopy> copies) {
+    const VideoCommon::Nx2GpuWork::InnerTag gpu_work{VideoCommon::Nx2GpuWork::Work::ImageCopy};
     if (ENABLE_MSAA_RESOLVE_CONSUME) {
         InvalidateResolveShadow(dst.Handle());
     }
@@ -2453,6 +2463,7 @@ void TextureCacheRuntime::CopyImage(Image& dst, Image& src,
 
 void TextureCacheRuntime::CopyImageMSAA(Image& dst, Image& src,
                                         std::span<const VideoCommon::ImageCopy> copies) {
+    const VideoCommon::Nx2GpuWork::InnerTag gpu_work{VideoCommon::Nx2GpuWork::Work::ImageCopy};
     const bool msaa_to_non_msaa = src.info.num_samples > 1 && dst.info.num_samples == 1;
     const u32 num_samples = msaa_to_non_msaa ? src.info.num_samples : dst.info.num_samples;
     if (ENABLE_MSAA_RESOLVE_CONSUME && msaa_to_non_msaa && copies.size() == 1 &&
@@ -2862,6 +2873,7 @@ void Image::AllocateComputeUnswizzleBuffer(u32 max_slices) {
 
 void Image::UploadMemory(VkBuffer buffer, VkDeviceSize offset,
                          std::span<const VideoCommon::BufferImageCopy> copies) {
+    const VideoCommon::Nx2GpuWork::InnerTag gpu_work{VideoCommon::Nx2GpuWork::Work::ImageUpload};
     // TODO: Move this to another API
     if (ENABLE_MSAA_RESOLVE_CONSUME && runtime != nullptr) {
         runtime->InvalidateResolveShadow(Handle());
@@ -2976,6 +2988,7 @@ void Image::DownloadMemory(VkBuffer buffer, size_t offset,
 
 void Image::DownloadMemory(std::span<VkBuffer> buffers_span, std::span<size_t> offsets_span,
                             std::span<const VideoCommon::BufferImageCopy> copies) {
+    const VideoCommon::Nx2GpuWork::InnerTag gpu_work{VideoCommon::Nx2GpuWork::Work::ImageDownload};
     if (!original_image) {
         LOG_CRITICAL(Render_Vulkan, "Missing image at download: gpu={:#x}, cpu={:#x}, type={}, format={}, flags={:#x}, size={}, dimensions={}x{}",
                      gpu_addr, cpu_addr, static_cast<u32>(info.type), static_cast<u32>(info.format),
@@ -3935,6 +3948,7 @@ bool Image::ScaleDown(bool ignore) {
 }
 
 bool Image::BlitScaleHelper(bool scale_up) {
+    const VideoCommon::Nx2GpuWork::InnerTag gpu_work{VideoCommon::Nx2GpuWork::Work::ImageCopy};
     using namespace VideoCommon;
     static constexpr auto BLIT_OPERATION = Tegra::Engines::Fermi2D::Operation::SrcCopy;
     const bool is_color{aspect_mask == VK_IMAGE_ASPECT_COLOR_BIT};
@@ -4694,6 +4708,7 @@ void TextureCacheRuntime::AccelerateImageUpload(
     Image& image, const StagingBufferRef& map,
     std::span<const VideoCommon::SwizzleParameters> swizzles,
     u32 z_start, u32 z_count) {
+    const VideoCommon::Nx2GpuWork::Tag gpu_work{VideoCommon::Nx2GpuWork::Work::AstcDecode};
 
     if (IsPixelFormatASTC(image.info.format)) {
         if (bc_encoder_pass && WillUseGpuBcnTranscode(device, image.info)) {
@@ -4720,12 +4735,14 @@ void TextureCacheRuntime::AccelerateImageUpload(
 void TextureCacheRuntime::AccelerateImageUploadLayers(
     Image& image, const StagingBufferRef& map,
     std::span<const VideoCommon::SwizzleParameters> swizzles, std::span<const u32> layers) {
+    const VideoCommon::Nx2GpuWork::Tag gpu_work{VideoCommon::Nx2GpuWork::Work::AstcDecode};
     astc_decoder_pass->AssembleLayers(image, map, swizzles, layers);
 }
 
 void TextureCacheRuntime::TranscodeAstcToBcn(
     Image& image, const StagingBufferRef& map,
     std::span<const VideoCommon::SwizzleParameters> swizzles) {
+    const VideoCommon::Nx2GpuWork::Tag gpu_work{VideoCommon::Nx2GpuWork::Work::AstcDecode};
     const ImageInfo& info = image.info;
     const u32 width = info.size.width;
     const u32 height = info.size.height;
@@ -4834,6 +4851,7 @@ void TextureCacheRuntime::TranscodeAstcToBcn(
 }
 
 void TextureCacheRuntime::TransitionImageLayout(Image& image) {
+    const VideoCommon::Nx2GpuWork::InnerTag gpu_work{VideoCommon::Nx2GpuWork::Work::ImageUpload};
     if (!image.ExchangeInitialization()) {
         VkImageMemoryBarrier barrier{
             .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,

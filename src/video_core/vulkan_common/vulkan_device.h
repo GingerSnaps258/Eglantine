@@ -402,6 +402,16 @@ public:
         return properties.properties.limits.minUniformBufferOffsetAlignment;
     }
 
+    /// Nanoseconds per timestamp tick.
+    float GetTimestampPeriod() const {
+        return properties.properties.limits.timestampPeriod;
+    }
+
+    /// Whether every graphics and compute queue supports vkCmdWriteTimestamp.
+    bool SupportsGraphicsTimestamps() const {
+        return properties.properties.limits.timestampComputeAndGraphics != VK_FALSE;
+    }
+
     /// Returns storage alignment requirement.
     VkDeviceSize GetStorageBufferAlignment() const {
         return properties.properties.limits.minStorageBufferOffsetAlignment;

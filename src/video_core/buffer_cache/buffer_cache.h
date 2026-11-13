@@ -25,6 +25,7 @@
 #include "video_core/host1x/gpu_device_memory_manager.h"
 #include "video_core/nx2.h"
 #include "video_core/nx2_draw_stats.h"
+#include "video_core/nx2_gpu_work.h"
 #include "video_core/nx2_hazard.h"
 #include "video_core/nx2_knobs.h"
 #include "video_core/nx2_perf.h"
@@ -418,6 +419,7 @@ void BufferCache<P>::DownloadRangesMemory(std::span<const std::pair<DAddr, u64>>
         download.copy.dst_offset += download_staging.offset;
         Buffer& buffer = slot_buffers[download.buffer_id];
         buffer.MarkUsage(download.copy.src_offset, download.copy.size);
+        const VideoCommon::Nx2GpuWork::Tag gpu_work{VideoCommon::Nx2GpuWork::Work::BufferDownload};
         runtime.CopyBuffer(download_staging.buffer, buffer, std::span{&download.copy, 1}, true);
     }
     runtime.Finish();
@@ -645,6 +647,7 @@ void BufferCache<P>::BindHostComputeBuffers() {
         BindHostComputeTextureBuffers();
     }
     if (any_buffer_uploaded) {
+        const VideoCommon::Nx2GpuWork::Tag gpu_work{VideoCommon::Nx2GpuWork::Work::BufferUpload};
         runtime.PostCopyBarrier();
         any_buffer_uploaded = false;
     }
@@ -895,6 +898,7 @@ void BufferCache<P>::CommitAsyncFlushesHigh() {
         runtime.DownloadStagingBuffer(use_batched ? batched_size_bytes : total_size_bytes, true);
     boost::container::small_vector<BufferCopy, 4> normalized_copies;
     Common::RangeSet<DAddr> download_ranges;
+    const VideoCommon::Nx2GpuWork::Tag gpu_work{VideoCommon::Nx2GpuWork::Work::BufferDownload};
     runtime.PreCopyBarrier();
     for (auto& [copy, buffer_id] : downloads) {
         Buffer& buffer = slot_buffers[buffer_id];
@@ -1285,6 +1289,7 @@ void BufferCache<P>::BindHostIndexBuffer() {
                 {BufferCopy{.src_offset = upload_staging.offset, .dst_offset = 0, .size = size}}};
             std::memcpy(upload_staging.mapped_span.data(),
                         draw_state.inline_index_draw_indexes.data(), size);
+            const VideoCommon::Nx2GpuWork::Tag gpu_work{VideoCommon::Nx2GpuWork::Work::BufferUpload};
             runtime.CopyBuffer(buffer, upload_staging.buffer, copies, true);
         } else {
             buffer.ImmediateUpload(0, draw_state.inline_index_draw_indexes);
@@ -2582,6 +2587,7 @@ bool BufferCache<P>::Nx2CopyListPages(u64 tick) {
                 .size = end - begin,
             };
             buffer.MarkUsage(copy.src_offset, copy.size);
+            const VideoCommon::Nx2GpuWork::Tag gpu_work{VideoCommon::Nx2GpuWork::Work::ListCopy};
             runtime.CopyBuffer(staging.buffer, buffer, std::span{&copy, 1}, true);
             recorded = true;
             std::scoped_lock lock{nx2_list_mutex};
@@ -3216,6 +3222,7 @@ void BufferCache<P>::MappedUploadMemory([[maybe_unused]] Buffer& buffer,
             copy.src_offset += upload_staging.offset;
         }
         const bool can_reorder = runtime.CanReorderUpload(buffer, copies);
+        const VideoCommon::Nx2GpuWork::Tag gpu_work{VideoCommon::Nx2GpuWork::Work::BufferUpload};
         runtime.CopyBuffer(buffer, upload_staging.buffer, copies, true, can_reorder);
     }
 }
@@ -3260,6 +3267,7 @@ void BufferCache<P>::InlineMemoryImplementation(DAddr dest_address, size_t copy_
         u8* const src_pointer = upload_staging.mapped_span.data();
         std::memcpy(src_pointer, inlined_buffer.data(), copy_size);
         const bool can_reorder = runtime.CanReorderUpload(buffer, copies);
+        const VideoCommon::Nx2GpuWork::Tag gpu_work{VideoCommon::Nx2GpuWork::Work::BufferUpload};
         runtime.CopyBuffer(buffer, upload_staging.buffer, copies, true, can_reorder);
     } else {
         buffer.ImmediateUpload(buffer.Offset(dest_address), inlined_buffer.first(copy_size));
@@ -3305,6 +3313,7 @@ void BufferCache<P>::DownloadBuffersMemory(std::span<const BufferId> buffer_ids)
         download.copy.dst_offset += download_staging.offset;
         Buffer& buffer = slot_buffers[download.buffer_id];
         buffer.MarkUsage(download.copy.src_offset, download.copy.size);
+        const VideoCommon::Nx2GpuWork::Tag gpu_work{VideoCommon::Nx2GpuWork::Work::BufferDownload};
         runtime.CopyBuffer(download_staging.buffer, buffer, std::span{&download.copy, 1}, true);
     }
     runtime.Finish();
@@ -3370,6 +3379,7 @@ void BufferCache<P>::DownloadBufferMemory(Buffer& buffer, DAddr device_addr, u64
             copy.dst_offset += download_staging.offset;
             buffer.MarkUsage(copy.src_offset, copy.size);
         }
+        const VideoCommon::Nx2GpuWork::Tag gpu_work{VideoCommon::Nx2GpuWork::Work::BufferDownload};
         runtime.CopyBuffer(download_staging.buffer, buffer, copies_span, true);
         runtime.Finish();
         for (const BufferCopy& copy : copies) {
