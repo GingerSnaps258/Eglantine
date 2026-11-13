@@ -102,7 +102,8 @@ ToolResult GpuProfile(ToolContext& ctx, const json& args) {
     const bool fresh = args.value(
         "fresh", (enabled && !was_enabled) || (GpuWork::Enabled() && !timestamps_were_on));
     const u64 called = Profile::Now();
-    if (fresh && enabled && ctx.GameRunning()) {
+    const bool timestamps = GpuWork::Enabled();
+    if (fresh && (enabled || timestamps) && ctx.GameRunning()) {
         const auto deadline = steady_clock::now() + milliseconds{2 * window_ms + 3000};
         while (steady_clock::now() < deadline) {
             // The front ("GPU thread") always reports; the split's back thread too when active.
@@ -120,7 +121,9 @@ ToolResult GpuProfile(ToolContext& ctx, const json& args) {
                     host_gpu_fresh |= is_fresh && name == HOST_GPU;
                 }
             }
-            if (front_fresh && newer >= total && (!GpuWork::Enabled() || host_gpu_fresh)) {
+            // With the profiler off only the host GPU report is refreshed.
+            const bool threads_fresh = !enabled || (front_fresh && newer >= total);
+            if (threads_fresh && (!timestamps || host_gpu_fresh)) {
                 break;
             }
             std::this_thread::sleep_for(milliseconds{50});
