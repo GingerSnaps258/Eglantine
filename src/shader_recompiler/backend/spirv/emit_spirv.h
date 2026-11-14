@@ -47,6 +47,21 @@ constexpr u32 COOPERATIVE_HMMA_TEST_LANE_WORDS = 10;
 /// buffer (set 0, binding 0), to check at startup that the driver's matrix layout is the expected.
 [[nodiscard]] std::vector<u32> EmitCooperativeHmmaTest(u32 spirv_version);
 
+/// Words per lane in the buffer of EmitTransposedCooperativeHmmaTest: a0 a1 a2 a3 b0 b1 c0 c1 as
+/// input, then d0 d1 (A * B + C), e0 e1 (A * B + D), and 1 if the shader's own workgroup memory
+/// kept its contents.
+constexpr u32 TRANSPOSED_HMMA_TEST_LANE_WORDS = 13;
+/// Invocations of EmitTransposedCooperativeHmmaTest's single workgroup: four warps.
+constexpr u32 TRANSPOSED_HMMA_TEST_INVOCATIONS = 128;
+
+/// A compute shader of four warps running two chained HMMA.16816.F16 through the transposed
+/// cooperative matrix helper the emulator emits, beside `shared_bytes` of the shader's own
+/// workgroup memory (filled with a pattern and checked after), declared with an explicit layout
+/// or as a plain array. Storage buffer at set 0, binding 0.
+[[nodiscard]] std::vector<u32> EmitTransposedCooperativeHmmaTest(u32 spirv_version,
+                                                                 u32 shared_bytes,
+                                                                 bool explicit_layout);
+
 /// Mesh emulation without VK_EXT_mesh_shader. The mesh program runs as a compute shader
 /// (RuntimeInfo::mesh_as_compute) that writes one block per workgroup to a u32 storage buffer:
 /// max_vertices * vertex_lines words (vertex v, line l at v * vertex_lines + l), then

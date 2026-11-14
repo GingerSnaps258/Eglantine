@@ -400,3 +400,309 @@ TEST_CASE("Compact HMMA lowering emits one helper call per matrix multiply",
     REQUIRE(static_cast<bool>(guarded_lowered));
     CHECK(std::ranges::none_of(guarded_lowered.instructions, is_tensor));
 }
+
+namespace {
+
+constexpr u32 OP_FUNCTION_CALL = 57;
+constexpr u32 OP_TYPE_ARRAY = 28;
+constexpr u32 OP_DECORATE = 71;
+constexpr u32 OP_MEMBER_DECORATE = 72;
+constexpr u32 OP_COOPERATIVE_MATRIX_LOAD = 4457;
+constexpr u32 OP_COOPERATIVE_MATRIX_STORE = 4458;
+constexpr u32 DECORATION_ARRAY_STRIDE = 6;
+constexpr u32 DECORATION_OFFSET = 35;
+constexpr u32 TILE_HALVES = 640; // per warp: A, B low, B high, C/D
+
+void UseTransposedPath(TensorProgram& fixture, u32 shared_bytes = 0, bool explicit_layout = false,
+                       bool layout_16bit = true) {
+    fixture.profile.support_transposed_cooperative_hmma = true;
+    fixture.profile.max_compute_shared_memory_size = 48 * 1024;
+    fixture.profile.support_explicit_workgroup_layout = explicit_layout;
+    fixture.profile.support_workgroup_layout_16bit_access = layout_16bit;
+    fixture.program.shared_memory_size = shared_bytes;
+}
+
+// Writes the module (EDEN_TENSOR_TEST_OUTPUT, else a temporary folder) and, when EDEN_SPIRV_VAL
+// names spirv-val, requires it to accept the module for Vulkan 1.3.
+bool ValidateModule(const std::vector<u32>& code, const std::string& name) {
+    const char* const output = std::getenv("EDEN_TENSOR_TEST_OUTPUT");
+    const char* const validator = std::getenv("EDEN_SPIRV_VAL");
+    if (output == nullptr && validator == nullptr) {
+        return false;
+    }
+    const std::filesystem::path directory =
+        output ? std::filesystem::path{output}
+               : std::filesystem::temp_directory_path() / "eden-tensor-test";
+    std::filesystem::create_directories(directory);
+    const std::filesystem::path path = directory / (name + ".spv");
+    {
+        std::ofstream file{path, std::ios::binary};
+        file.write(reinterpret_cast<const char*>(code.data()),
+                   static_cast<std::streamsize>(code.size() * sizeof(u32)));
+        REQUIRE(file.good());
+    }
+    if (validator == nullptr) {
+        return false;
+    }
+    std::string command = "\"" + std::string{validator} + "\" --target-env vulkan1.3 \"" +
+                          path.string() + "\"";
+#ifdef _WIN32
+    command = "\"" + command + "\""; // cmd.exe strips the outer quotes
+#endif
+    INFO(command);
+    REQUIRE(std::system(command.c_str()) == 0);
+    return true;
+}
+
+void RequireTransposedTypes(const std::vector<u32>& code) {
+    const auto constants = Constants(code);
+    const auto types = Instructions(code, OP_TYPE_COOPERATIVE_MATRIX);
+    REQUIRE(types.size() == 3);
+    std::array<std::pair<u32, u32>, 3> shape_by_use{};
+    for (const auto& words : types) {
+        REQUIRE(constants.at(words[2]) == 3); // Subgroup scope
+        shape_by_use.at(constants.at(words[5])) = {constants.at(words[3]), constants.at(words[4])};
+    }
+    // A = B^T (8x16), B = A^T (16x16), accumulator = C^T (8x16): Intel's M8 N16 K16.
+    REQUIRE(shape_by_use == std::array<std::pair<u32, u32>, 3>{{{8, 16}, {16, 16}, {8, 16}}});
+}
+
+// One helper: four column-major loads, two products (one per K half), one store, with the
+// memory operands the lanes' sharing needs under the Vulkan memory model.
+void RequireTransposedHelper(const std::vector<u32>& code) {
+    const auto constants = Constants(code);
+    RequireTransposedTypes(code);
+    REQUIRE(HasCapability(code, CAPABILITY_COOPERATIVE_MATRIX));
+    RequireVulkanMemoryModel(code);
+    const auto loads = Instructions(code, OP_COOPERATIVE_MATRIX_LOAD);
+    REQUIRE(loads.size() == 4);
+    for (const auto& words : loads) {
+        REQUIRE(words.size() == 7);                // type, result, pointer, layout, stride, mask, scope
+        REQUIRE(constants.at(words[3]) == 1);      // ColumnMajorKHR
+        const u32 stride = constants.at(words[4]); // in halves
+        REQUIRE((stride == 8 || stride == 16));
+        REQUIRE((stride * 2) % 16 == 0);           // VUID-RuntimeSpirv-OpCooperativeMatrixLoadKHR-08986
+        REQUIRE(words[5] == 0x30);                 // NonPrivatePointer | MakePointerVisible
+        REQUIRE(constants.at(words[6]) == 2);      // Workgroup
+    }
+    const auto stores = Instructions(code, OP_COOPERATIVE_MATRIX_STORE);
+    REQUIRE(stores.size() == 1);
+    REQUIRE(stores[0].size() == 6);
+    REQUIRE(constants.at(stores[0][2]) == 1);
+    REQUIRE(constants.at(stores[0][3]) == 8);
+    REQUIRE(stores[0][4] == 0x28); // NonPrivatePointer | MakePointerAvailable
+    REQUIRE(Instructions(code, OP_COOPERATIVE_MATRIX_MUL_ADD).size() == 2);
+    // No placeholder survives the patch.
+    for (const auto& words : Instructions(code, 169)) { // OpSelect
+        for (const auto& type : Instructions(code, OP_TYPE_COOPERATIVE_MATRIX)) {
+            REQUIRE(words[0] != type[0]);
+        }
+    }
+}
+
+// The staging array: TILE_HALVES halves per warp. Returns its OpTypeArray result id.
+u32 StagingArray(const std::vector<u32>& code, u32 warps) {
+    const auto constants = Constants(code);
+    for (const auto& words : Instructions(code, OP_TYPE_ARRAY)) {
+        const auto length = constants.find(words[2]);
+        if (length != constants.end() && length->second == warps * TILE_HALVES) {
+            return words[0];
+        }
+    }
+    FAIL("no staging array");
+    return 0;
+}
+
+} // namespace
+
+TEST_CASE("Transposed cooperative HMMA is opt-in and never replaces the direct path",
+          "[video_core][tensor][ampere]") {
+    SECTION("default: shader emulation") {
+        TensorProgram fixture{3, 16};
+        fixture.profile.max_compute_shared_memory_size = 48 * 1024;
+        const auto code = fixture.Emit();
+        REQUIRE_FALSE(HasCapability(code, CAPABILITY_COOPERATIVE_MATRIX));
+        REQUIRE_FALSE(fixture.program.info.uses_transposed_cooperative_hmma);
+    }
+    SECTION("transposed only") {
+        TensorProgram fixture{3, 16};
+        UseTransposedPath(fixture);
+        const auto code = fixture.Emit("transposed-k16");
+        RequireTransposedHelper(code);
+        REQUIRE(fixture.program.info.uses_cooperative_matrix);
+        REQUIRE(fixture.program.info.uses_transposed_cooperative_hmma);
+        REQUIRE(Instructions(code, OP_FUNCTION_CALL).size() == 3); // one helper, three calls
+        REQUIRE(Instructions(code, 345).empty());                  // no software helper
+        ValidateModule(code, "transposed-k16");
+    }
+    SECTION("both: the direct path wins") {
+        TensorProgram fixture{3, 16};
+        UseTransposedPath(fixture);
+        fixture.profile.support_cooperative_hmma = true;
+        const auto code = fixture.Emit();
+        RequireHmmaMatrixTypes(code);
+        REQUIRE(Instructions(code, OP_COOPERATIVE_MATRIX_LOAD).empty());
+        REQUIRE(Instructions(code, OP_COOPERATIVE_MATRIX_MUL_ADD).size() == 3);
+        REQUIRE(fixture.program.info.uses_cooperative_matrix);
+        REQUIRE_FALSE(fixture.program.info.uses_transposed_cooperative_hmma);
+    }
+}
+
+TEST_CASE("Transposed cooperative HMMA stages past the program's workgroup memory",
+          "[video_core][tensor][ampere]") {
+    // 6,900 bytes: not 16-byte aligned, so the tiles must start at 6,912.
+    constexpr u32 shared_bytes = 6900;
+    constexpr u32 staging_base = 6912;
+    constexpr u32 warps = 2; // the fixture's 64 invocations
+    STATIC_REQUIRE(TILE_HALVES * 2 % 16 == 0);
+    for (const bool explicit_layout : {false, true}) {
+        DYNAMIC_SECTION((explicit_layout ? "explicit" : "plain") << " layout") {
+            TensorProgram fixture{1, 16};
+            UseTransposedPath(fixture, shared_bytes, explicit_layout);
+            const std::string name = explicit_layout ? "transposed-explicit" : "transposed-plain";
+            const auto code = fixture.Emit(name);
+            RequireTransposedHelper(code);
+            const u32 array = StagingArray(code, warps);
+            bool strided = false;
+            for (const auto& words : Instructions(code, OP_DECORATE)) {
+                strided |= words[0] == array && words[1] == DECORATION_ARRAY_STRIDE && words[2] == 2;
+            }
+            u32 staging_offsets = 0;
+            for (const auto& words : Instructions(code, OP_MEMBER_DECORATE)) {
+                if (words[2] == DECORATION_OFFSET && words[3] != 0) {
+                    REQUIRE(words[3] == staging_base);
+                    REQUIRE(words[3] % 16 == 0);
+                    ++staging_offsets;
+                }
+            }
+            if (explicit_layout) {
+                // Block members alias from byte 0: the tiles' member starts past the program's.
+                REQUIRE(strided);
+                REQUIRE(staging_offsets == 1);
+                REQUIRE(HasCapability(code, 4430)); // WorkgroupMemoryExplicitLayout16BitAccessKHR
+            } else {
+                // A separate, unaliased variable.
+                REQUIRE_FALSE(strided);
+                REQUIRE(staging_offsets == 0);
+            }
+            ValidateModule(code, name);
+        }
+    }
+}
+
+TEST_CASE("Transposed cooperative HMMA falls back to shader emulation",
+          "[video_core][tensor][ampere]") {
+    const auto require_software = [](TensorProgram& fixture) {
+        const auto code = fixture.Emit();
+        REQUIRE_FALSE(HasCapability(code, CAPABILITY_COOPERATIVE_MATRIX));
+        REQUIRE(Instructions(code, OP_TYPE_COOPERATIVE_MATRIX).empty());
+        REQUIRE(Instructions(code, OP_FUNCTION_CALL).size() == 1);
+        REQUIRE_FALSE(fixture.program.info.uses_cooperative_matrix);
+        REQUIRE_FALSE(fixture.program.info.uses_transposed_cooperative_hmma);
+    };
+    SECTION("workgroup memory one byte short of the tiles") {
+        TensorProgram fixture{1, 16};
+        UseTransposedPath(fixture, 6912);
+        fixture.profile.max_compute_shared_memory_size = 6912 + 2 * TILE_HALVES * 2 - 1;
+        require_software(fixture);
+    }
+    SECTION("workgroup memory exactly enough") {
+        TensorProgram fixture{1, 16};
+        UseTransposedPath(fixture, 6912);
+        fixture.profile.max_compute_shared_memory_size = 6912 + 2 * TILE_HALVES * 2;
+        const auto code = fixture.Emit();
+        REQUIRE(fixture.program.info.uses_transposed_cooperative_hmma);
+    }
+    SECTION("explicit layout without 16-bit workgroup access") {
+        TensorProgram fixture{1, 16};
+        UseTransposedPath(fixture, 6912, true, false);
+        require_software(fixture);
+    }
+    SECTION("a workgroup that leaves a warp unfilled") {
+        TensorProgram fixture{1, 16};
+        UseTransposedPath(fixture);
+        fixture.program.workgroup_size = {48, 1, 1};
+        require_software(fixture);
+    }
+    SECTION("coherent memory") {
+        TensorProgram fixture{1, 16};
+        UseTransposedPath(fixture);
+        fixture.program.info.requires_coherent_global_memory = true;
+        require_software(fixture);
+    }
+}
+
+// A program can mix paths: its K=16 HMMAs take the transposed helper while its K=8 ones keep the
+// software helper (and guarded HMMAs never reach the backend, see the lowering test below).
+TEST_CASE("Transposed cooperative HMMA mixes with the K8 software helper",
+          "[video_core][tensor][ampere]") {
+    TensorProgram fixture{1, 16};
+    UseTransposedPath(fixture, 2048, true);
+    IR::IREmitter ir{fixture.block};
+    const auto one = ir.Imm32(0x3c003c00U);
+    const auto k8 = ir.TensorMulAdd(ir.CompositeConstruct(one, one, one, one),
+                                    ir.CompositeConstruct(one, one),
+                                    ir.CompositeConstruct(ir.Imm32(0), ir.Imm32(0)), 8);
+    fixture.block.AppendNewInst(IR::Opcode::WriteStorage32,
+                                {ir.Imm32(0), ir.Imm32(1024), ir.CompositeExtract(k8, 0)});
+    const auto code = fixture.Emit("transposed-mixed-k8");
+    RequireTransposedHelper(code);
+    REQUIRE(fixture.program.info.uses_transposed_cooperative_hmma);
+    REQUIRE(Instructions(code, OP_FUNCTION_CALL).size() == 2); // transposed helper, K8 helper
+    REQUIRE(Instructions(code, 345).size() == 16);             // the K8 helper's shuffles
+    ValidateModule(code, "transposed-mixed-k8");
+}
+
+TEST_CASE("Compact HMMA lowering keeps a guarded HMMA expanded beside a compact one",
+          "[video_core][tensor][ampere]") {
+    constexpr Ampere::Instruction Hmma{{0x102c723c, 0x30, 0x8ff, 0x04aff000}};
+    constexpr Ampere::Instruction Exit{{0x0000794d, 0, 0x03800000, 0}};
+    Ampere::Instruction guarded = Hmma;
+    guarded.words[0] = (guarded.words[0] & ~0xf000U) | (1U << 12);
+    const std::array code{Hmma, guarded, Exit};
+    const auto is_tensor = [](u64 word) { return (word >> 51) == (0x5d30000000000000ULL >> 51); };
+    const auto lowered = Ampere::LowerToMaxwell(code, {.tensor = true, .compact_tensor = true});
+    INFO(lowered.error);
+    REQUIRE(static_cast<bool>(lowered));
+    REQUIRE(std::ranges::count_if(lowered.instructions, is_tensor) == 1);
+    const std::array single_code{Hmma, Exit};
+    const auto single = Ampere::LowerToMaxwell(single_code, {.tensor = true, .compact_tensor = true});
+    REQUIRE(static_cast<bool>(single));
+    CHECK(lowered.instructions.size() > single.instructions.size() * 4); // the expansion
+}
+
+TEST_CASE("Transposed cooperative HMMA self-test shader runs the emitted helper",
+          "[video_core][tensor][ampere]") {
+    for (const u32 version : {0x00010300U, 0x00010400U, 0x00010600U}) {
+        for (const bool explicit_layout : {false, true}) {
+            if (explicit_layout && version < 0x00010400U) {
+                // SPV_KHR_workgroup_memory_explicit_layout needs SPIR-V 1.4.
+                REQUIRE_THROWS(Backend::SPIRV::EmitTransposedCooperativeHmmaTest(version, 6912, true));
+                continue;
+            }
+            const auto code =
+                Backend::SPIRV::EmitTransposedCooperativeHmmaTest(version, 6912, explicit_layout);
+            REQUIRE(code[1] == version);
+            RequireTransposedHelper(code);
+            REQUIRE(Instructions(code, OP_FUNCTION_CALL).size() == 2); // two chained HMMAs
+            const auto modes = Instructions(code, 16); // OpExecutionMode
+            REQUIRE(modes.size() == 1);
+            REQUIRE(modes[0][2] == Backend::SPIRV::TRANSPOSED_HMMA_TEST_INVOCATIONS);
+            ValidateModule(code, "transposed-self-test-" + std::to_string(version) +
+                                     (explicit_layout ? "-explicit" : "-plain"));
+        }
+    }
+}
+
+TEST_CASE("Transposed cooperative HMMA modules pass spirv-val", "[video_core][tensor][ampere]") {
+    if (std::getenv("EDEN_SPIRV_VAL") == nullptr) {
+        SKIP("set EDEN_SPIRV_VAL to spirv-val to validate the transposed modules");
+    }
+    for (const bool explicit_layout : {false, true}) {
+        TensorProgram fixture{2, 16};
+        UseTransposedPath(fixture, 6912, explicit_layout);
+        const auto code = fixture.Emit();
+        REQUIRE(ValidateModule(code, explicit_layout ? "transposed-val-explicit"
+                                                     : "transposed-val-plain"));
+    }
+}

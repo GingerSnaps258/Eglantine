@@ -362,6 +362,8 @@ struct Info {
     bool requires_coherent_image_memory{};
     /// Set by the SPIR-V backend when HMMA runs on cooperative matrices, which need full subgroups
     bool uses_cooperative_matrix{};
+    /// Of those, through the transposed M8 N16 K16 path (workgroup memory staging)
+    bool uses_transposed_cooperative_hmma{};
     /// Native global accesses whose pointer is chosen at run time: every storage buffer descriptor
     /// is a candidate and its bound length (not an NVN size word) limits the range.
     bool native_global_bounds{};

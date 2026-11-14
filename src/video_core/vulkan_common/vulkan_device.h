@@ -221,6 +221,12 @@ enum class FormatType { Linear, Optimal, Buffer };
 /// Subgroup size of the guest emulated hardware (Nvidia has 32 threads per subgroup).
 const u32 GuestWarpSize = 32;
 
+/// EDEN_NX2_COOP_HMMA: unset keeps the default (the direct 16x8x16 cooperative path where the
+/// device has that shape); "transposed" also allows the transposed M8 N16 K16 path on devices
+/// without it; "0" or "off" keeps guest tensor operations in shader emulation everywhere.
+enum class CooperativeHmmaMode { Default, Off, Transposed };
+[[nodiscard]] CooperativeHmmaMode GetCooperativeHmmaMode();
+
 enum class NvidiaArchitecture {
     Arch_KeplerOrOlder,
     Arch_Maxwell,
@@ -684,7 +690,13 @@ FN_MAX_LIMIT_LIST
     /// Returns true if the guest's HMMA.16816.F16 can run on the host's cooperative matrices
     /// (VK_KHR_cooperative_matrix with the same 16x8x16 shape on 16-bit floats, 32-lane subgroups).
     bool IsCooperativeHmmaSupported() const {
-        return extensions.cooperative_matrix;
+        return extensions.cooperative_matrix && cooperative_hmma_direct;
+    }
+
+    /// Returns true if HMMA.16816.F16 may run as the transposed M8 N16 K16 product through
+    /// workgroup memory (EDEN_NX2_COOP_HMMA=transposed on a device without the 16x8x16 shape).
+    bool IsTransposedCooperativeHmmaSupported() const {
+        return extensions.cooperative_matrix && cooperative_hmma_transposed;
     }
 
     /// Returns true if the device supports VK_KHR_shader_quad_control.
@@ -1351,6 +1363,8 @@ private:
     bool is_blit_depth32_stencil8_supported{}; ///< Support for blitting from and to D32S8.
     bool is_warp_potentially_bigger{};         ///< Host warp size can be bigger than guest.
     bool float16_math{};                       ///< Shaders may do float16 arithmetic.
+    bool cooperative_hmma_direct{};            ///< Cooperative matrices with the 16x8x16 shape
+    bool cooperative_hmma_transposed{};        ///< The transposed M8 N16 K16 path may be tried
     bool is_integrated{};                      ///< Is GPU an iGPU.
     bool is_virtual{};                         ///< Is GPU a virtual GPU.
     bool is_non_gpu{};                         ///< Is SoftwareRasterizer, FPGA, non-GPU device.

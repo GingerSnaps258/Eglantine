@@ -169,6 +169,21 @@ struct CooperativeHmmaTypes {
     Id matrix_a{};
     Id matrix_b{};
     Id matrix_c{};
+    /// Transposed path (M8 N16 K16): D^T(8x16) = B^T(8x16) * A^T(16x16) + C^T(8x16). The loads
+    /// are OpBitFieldUExtract markers of these result types and the stores OpStore markers listed
+    /// in transposed_stores; PatchCooperativeHmma turns them into the cooperative matrix
+    /// instructions with their memory operands.
+    Id transposed_a{};
+    Id transposed_b{};
+    Id transposed_c{};
+    Id column_major{};
+    Id workgroup_scope{};
+    struct Store {
+        u32 pointer;
+        u32 object;
+        u32 stride; ///< Id of the stride constant
+    };
+    std::vector<Store> transposed_stores;
 };
 
 class EmitContext final : public Sirit::Module {
@@ -399,6 +414,7 @@ public:
 
     std::array<Id, 2> software_matrix_functions{};
     std::optional<CooperativeHmmaTypes> cooperative_hmma; ///< Set when a program lowers HMMA to it
+    Id transposed_hmma_function{}; ///< Set when cooperative_hmma is the transposed path
     std::vector<Id> interfaces;
     std::vector<std::pair<u32, spv::Op>> opcode_rewrites;
 

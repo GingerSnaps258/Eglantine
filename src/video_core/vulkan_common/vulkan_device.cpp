@@ -43,6 +43,26 @@
 
 namespace Vulkan {
 using namespace Common::Literals;
+
+CooperativeHmmaMode GetCooperativeHmmaMode() {
+    static const CooperativeHmmaMode mode = [] {
+        const char* const value = std::getenv("EDEN_NX2_COOP_HMMA");
+        if (value == nullptr) {
+            return CooperativeHmmaMode::Default;
+        }
+        const std::string_view text{value};
+        if (text == "transposed") {
+            return CooperativeHmmaMode::Transposed;
+        }
+        if (text == "0" || text == "off") {
+            return CooperativeHmmaMode::Off;
+        }
+        LOG_WARNING(Render_Vulkan, "Unknown EDEN_NX2_COOP_HMMA value {} (transposed, off)", text);
+        return CooperativeHmmaMode::Default;
+    }();
+    return mode;
+}
+
 namespace {
 namespace Alternatives {
 constexpr std::array STENCIL8_UINT{
@@ -1646,10 +1666,10 @@ void Device::RemoveUnsuitableExtensions() {
     // 32-lane warp. The matrices hold 16-bit floats, so the device needs shaderFloat16. Shaders
     // with them use the Vulkan memory model and run with full subgroups.
     {
-        const bool has_shape = std::ranges::any_of(
-            physical.GetCooperativeMatrixPropertiesKHR(),
-            [](const VkCooperativeMatrixPropertiesKHR& shape) {
-                return shape.MSize == 16 && shape.NSize == 8 && shape.KSize == 16 &&
+        const auto shapes = physical.GetCooperativeMatrixPropertiesKHR();
+        const auto has_f16_shape = [&](u32 m, u32 n, u32 k) {
+            return std::ranges::any_of(shapes, [=](const VkCooperativeMatrixPropertiesKHR& shape) {
+                return shape.MSize == m && shape.NSize == n && shape.KSize == k &&
                        shape.AType == VK_COMPONENT_TYPE_FLOAT16_KHR &&
                        shape.BType == VK_COMPONENT_TYPE_FLOAT16_KHR &&
                        shape.CType == VK_COMPONENT_TYPE_FLOAT16_KHR &&
@@ -1657,8 +1677,13 @@ void Device::RemoveUnsuitableExtensions() {
                        shape.saturatingAccumulation == VK_FALSE &&
                        shape.scope == VK_SCOPE_SUBGROUP_KHR;
             });
-        extensions.cooperative_matrix =
-            extensions.cooperative_matrix && features.cooperative_matrix.cooperativeMatrix &&
+        };
+        const bool has_shape = has_f16_shape(16, 8, 16);
+        const bool extension_available = extensions.cooperative_matrix;
+        const CooperativeHmmaMode mode = GetCooperativeHmmaMode();
+        cooperative_hmma_direct =
+            mode != CooperativeHmmaMode::Off && extension_available &&
+            features.cooperative_matrix.cooperativeMatrix &&
             has_shape &&
             (properties.cooperative_matrix.cooperativeMatrixSupportedStages &
              VK_SHADER_STAGE_COMPUTE_BIT) != 0 &&
@@ -1673,6 +1698,50 @@ void Device::RemoveUnsuitableExtensions() {
             features.vulkan_memory_model.vulkanMemoryModel &&
             features.vulkan_memory_model.vulkanMemoryModelDeviceScope &&
             features.shader_float16_int8.shaderFloat16;
+        // EDEN_NX2_COOP_HMMA=transposed: a device without the guest's shape (Intel reports only
+        // M8 N16 K16) may run HMMA as the transposed product through workgroup memory. Checked on
+        // reported capabilities only; the self-test (TestTransposedCooperativeHmma) decides.
+        cooperative_hmma_transposed = false;
+        if (mode == CooperativeHmmaMode::Transposed && !has_shape) {
+            const auto& size_control = properties.subgroup_size_control;
+            const char* failed = nullptr;
+            if (!extension_available || !features.cooperative_matrix.cooperativeMatrix) {
+                failed = "VK_KHR_cooperative_matrix is not available";
+            } else if ((properties.cooperative_matrix.cooperativeMatrixSupportedStages &
+                        VK_SHADER_STAGE_COMPUTE_BIT) == 0) {
+                failed = "cooperative matrices are not supported in compute shaders";
+            } else if (!has_f16_shape(8, 16, 16)) {
+                failed = "no M8 N16 K16 f16 subgroup shape";
+            } else if (!extensions.subgroup_size_control ||
+                       !features.subgroup_size_control.subgroupSizeControl ||
+                       !features.subgroup_size_control.computeFullSubgroups ||
+                       !IsGuestWarpSizeSupported(VK_SHADER_STAGE_COMPUTE_BIT) ||
+                       size_control.minSubgroupSize > GuestWarpSize ||
+                       size_control.maxSubgroupSize < GuestWarpSize) {
+                failed = "compute subgroups can't be required to be 32 lanes wide and full";
+            } else if (!features.vulkan_memory_model.vulkanMemoryModel ||
+                       !features.vulkan_memory_model.vulkanMemoryModelDeviceScope) {
+                failed = "no Vulkan memory model";
+            } else if (!features.shader_float16_int8.shaderFloat16) {
+                failed = "no shaderFloat16";
+            }
+            cooperative_hmma_transposed = failed == nullptr;
+            if (failed) {
+                LOG_WARNING(Render_Vulkan, "Transposed cooperative HMMA gate failed: {}", failed);
+            } else {
+                LOG_INFO(Render_Vulkan,
+                         "Transposed cooperative HMMA gate passed: M8 N16 K16 f16 subgroup shape, "
+                         "subgroups {}-{} (32 required, full)",
+                         size_control.minSubgroupSize, size_control.maxSubgroupSize);
+            }
+        } else if (mode == CooperativeHmmaMode::Transposed) {
+            LOG_INFO(Render_Vulkan, "EDEN_NX2_COOP_HMMA=transposed: the device has the 16x8x16 "
+                                    "shape, the direct path applies instead");
+        } else if (mode == CooperativeHmmaMode::Off) {
+            LOG_INFO(Render_Vulkan, "EDEN_NX2_COOP_HMMA=off: guest tensor operations stay in "
+                                    "shader emulation");
+        }
+        extensions.cooperative_matrix = cooperative_hmma_direct || cooperative_hmma_transposed;
         features.cooperative_matrix.cooperativeMatrixRobustBufferAccess = VK_FALSE;
         RemoveExtensionFeatureIfUnsuitable(extensions.cooperative_matrix,
                                            features.cooperative_matrix,

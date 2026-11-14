@@ -680,6 +680,7 @@ std::vector<u32> EmitSPIRV(const Profile& profile, const RuntimeInfo& runtime_in
         PatchCooperativeHmma(code, *ctx.cooperative_hmma);
     }
     program.info.uses_cooperative_matrix = ctx.cooperative_hmma.has_value();
+    program.info.uses_transposed_cooperative_hmma = Sirit::ValidId(ctx.transposed_hmma_function);
     return code;
 }
 

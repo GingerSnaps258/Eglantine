@@ -108,6 +108,11 @@ struct Profile {
     bool has_broken_spirv_subgroup_shuffle{};
     /// The guest's HMMA.16816.F16 runs on a cooperative matrix, in compute shaders
     bool support_cooperative_hmma{};
+    /// HMMA.16816.F16 runs as the transposed M8 N16 K16 product of a device without the 16x8x16
+    /// shape, through workgroup memory (EDEN_NX2_COOP_HMMA=transposed)
+    bool support_transposed_cooperative_hmma{};
+    /// maxComputeSharedMemorySize: the transposed path's staging must fit beside the program's
+    u32 max_compute_shared_memory_size{};
     bool has_broken_spirv_fragment_shuffle{};
     u32 max_subgroup_size{};
 

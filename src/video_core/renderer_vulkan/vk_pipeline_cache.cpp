@@ -622,6 +622,10 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
         .max_user_clip_distances = device.GetMaxUserClipDistances()};
     profile.support_cooperative_hmma =
         device.IsCooperativeHmmaSupported() && TestCooperativeHmma(device);
+    // Opt-in (EDEN_NX2_COOP_HMMA=transposed); never on a device with the direct path's shape.
+    profile.support_transposed_cooperative_hmma =
+        device.IsTransposedCooperativeHmmaSupported() && TestTransposedCooperativeHmma(device);
+    profile.max_compute_shared_memory_size = device.GetMaxComputeSharedMemorySize();
 
     host_info = Shader::HostTranslateInfo{
         .min_ssbo_alignment = device.GetStorageBufferAlignment(),
@@ -3481,6 +3485,17 @@ ComputePipelineCacheEntry PipelineCache::CreateComputePipeline(ShaderPools& pool
     const std::vector<u32> code{EmitSPIRV(profile, program)};
     device.SaveShader(code);
     vk::ShaderModule spv_module{BuildShader(device, code)};
+    // A program on the transposed cooperative HMMA path keeps a shader-emulation build of itself,
+    // used if the driver rejects the cooperative one. Emitting again only rewrites the program's
+    // SPIR-V definitions; its info is restored to the cooperative build's.
+    vk::ShaderModule fallback_module;
+    if (program.info.uses_transposed_cooperative_hmma) {
+        const Shader::Info cooperative_info{program.info};
+        Shader::Profile fallback_profile{profile};
+        fallback_profile.support_transposed_cooperative_hmma = false;
+        fallback_module = BuildShader(device, EmitSPIRV(fallback_profile, program));
+        program.info = cooperative_info;
+    }
 
     // Text log + .spv dump. Same split as the graphics path.
     const bool should_log = GPU::Logging::IsActive();
@@ -3506,7 +3521,7 @@ ComputePipelineCacheEntry PipelineCache::CreateComputePipeline(ShaderPools& pool
     return {.pipeline = std::make_unique<ComputePipeline>(
                 device, scheduler, vulkan_pipeline_cache, descriptor_pool, guest_descriptor_queue,
                 descriptor_buffer_ring, thread_worker, statistics, &shader_notify, program.info,
-                std::move(spv_module), key.unique_hash),
+                std::move(spv_module), key.unique_hash, std::move(fallback_module)),
             .null_pointer_slots = env.IsNativeProgram() ? env.NullStoragePointerSlots()
                                                         : std::vector<std::pair<u32, u32>>{},
             .mapped_pointers =

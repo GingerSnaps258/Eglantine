@@ -42,11 +42,13 @@ ComputePipeline::ComputePipeline(const Device& device_, Scheduler& scheduler, vk
                                  Common::ThreadWorker* thread_worker,
                                  PipelineStatistics* pipeline_statistics,
                                  VideoCore::ShaderNotify* shader_notify, const Shader::Info& info_,
-                                 vk::ShaderModule spv_module_, u64 shader_hash_)
+                                 vk::ShaderModule spv_module_, u64 shader_hash_,
+                                 vk::ShaderModule fallback_module_)
     : device{device_},
       pipeline_cache(pipeline_cache_), guest_descriptor_queue{guest_descriptor_queue_},
       descriptor_buffer_ring{descriptor_buffer_ring_}, info{info_},
-      shader_hash{shader_hash_}, spv_module(std::move(spv_module_)) {
+      shader_hash{shader_hash_}, spv_module(std::move(spv_module_)),
+      fallback_module(std::move(fallback_module_)) {
     if (shader_notify) {
         shader_notify->MarkShaderBuilding();
     }
@@ -139,7 +141,33 @@ ComputePipeline::ComputePipeline(const Device& device_, Scheduler& scheduler, vk
         };
         try {
             const auto build_begin = std::chrono::steady_clock::now();
-            pipeline = device.GetLogical().CreateComputePipeline(compute_ci, *pipeline_cache);
+            if (fallback_module) {
+                // The transposed cooperative HMMA build: a rejection, or VK_SUCCESS without a
+                // pipeline (Intel has done so for shaders it failed to compile), falls back to the
+                // build with the HMMA in shader emulation, same descriptors, same 32-lane warps.
+                std::string reason;
+                try {
+                    pipeline = device.GetLogical().CreateComputePipeline(compute_ci, *pipeline_cache);
+                    if (!pipeline) {
+                        reason = "no pipeline returned";
+                    }
+                } catch (const vk::Exception& exception) {
+                    reason = exception.what();
+                }
+                if (!reason.empty()) {
+                    LOG_WARNING(Render_Vulkan,
+                                "Transposed cooperative HMMA pipeline {:016X} failed ({}): built "
+                                "with shader emulation instead",
+                                shader_hash, reason);
+                    VkComputePipelineCreateInfo fallback_ci{compute_ci};
+                    fallback_ci.stage.flags = 0;
+                    fallback_ci.stage.module = *fallback_module;
+                    pipeline = device.GetLogical().CreateComputePipeline(fallback_ci, *pipeline_cache);
+                }
+                fallback_module.reset();
+            } else {
+                pipeline = device.GetLogical().CreateComputePipeline(compute_ci, *pipeline_cache);
+            }
             DriverBuildReport::Record(DriverBuildReport::Kind::Compute,
                                       std::chrono::steady_clock::now() - build_begin);
         } catch (const vk::Exception& exception) {
